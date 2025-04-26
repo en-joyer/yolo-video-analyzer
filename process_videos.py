@@ -1,6 +1,9 @@
 # YOLO Frame Extraction and Analysis with Person Detection Folder
 # This script extracts all frames from videos using ffmpeg, analyzes each frame with YOLO,
-# and saves frames with people detected to a separate folder
+# and saves frames with people detected to a separate folder organized by date
+
+#https://github.com/en-joyer/yolo-video-analyzer
+#This script written by @en-joyer
 
 # Install required libraries
 #!pip install opencv-python ultralytics tqdm
@@ -13,21 +16,24 @@ import shutil
 import numpy as np
 from glob import glob
 import time
+import re
+import datetime
 from ultralytics import YOLO
 from tqdm import tqdm
 
 # Directory settings
-VIDEO_DIR = "."  # Directory containing .mp4 files (current directory)
+VIDEO_DIR = "./videos"  # Directory containing .mp4 files (in /videos and its subdirectories)
 FRAMES_DIR = "./extracted_frames"  # Directory for extracted frames
 PERSON_FRAMES_DIR = "./detected_person"  # Directory for frames with people detected
-OUTPUT_DIR = "./yolo_clips"  # Output directory for extracted clips
+OUTPUT_DIR = "./yolo_clips"  # Base output directory for extracted clips
 LOG_FILE = "./processed_videos.txt"  # Log file to track processed videos
 
 # Processing settings
 CONFIDENCE_THRESHOLD = 0.5  # Minimum confidence for YOLO detections
-EXTRACT_FRAME_RATE = 2  # Extract 5 frames per second (adjust for efficiency)
+EXTRACT_FRAME_RATE = 5  # Extract 5 frames per second (adjust for efficiency)
 
 # Create necessary directories
+os.makedirs(VIDEO_DIR, exist_ok=True)  # Create videos directory if it doesn't exist
 os.makedirs(FRAMES_DIR, exist_ok=True)
 os.makedirs(PERSON_FRAMES_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -44,15 +50,58 @@ print("Loading YOLO model...")
 model = YOLO("yolov8n.pt")  # Using YOLOv8 nano model
 print("YOLO model loaded")
 
-# Find all .mp4 videos in the directory
-video_files = glob(os.path.join(VIDEO_DIR, "*.mp4"))
+# Find all .mp4 videos in the directory AND subdirectories
+def find_all_videos(base_dir):
+    all_videos = []
+    for root, dirs, files in os.walk(base_dir):
+        for file in files:
+            if file.lower().endswith(".mp4"):
+                all_videos.append(os.path.join(root, file))
+    return all_videos
+
+# Get all videos
+video_files = find_all_videos(VIDEO_DIR)
+print(f"Found {len(video_files)} videos in {VIDEO_DIR} and its subdirectories")
+
+# Function to extract date and time from filename (e.g., Camera10_20250425190000_20250425193000.mp4)
+def extract_date_from_filename(filename):
+    # Extract the base filename without path or extension
+    base_name = os.path.basename(filename)
+    
+    # Try to match the pattern like Camera10_20250425190000_20250425193000.mp4
+    # We'll use the first date/time found (start time)
+    match = re.search(r'_(\d{14})_', base_name)
+    
+    if match:
+        date_str = match.group(1)
+        try:
+            # Parse the date string (format: YYYYMMDDHHMMSS)
+            year = int(date_str[0:4])
+            month = int(date_str[4:6])
+            day = int(date_str[6:8])
+            hour = int(date_str[8:10])
+            minute = int(date_str[10:12])
+            second = int(date_str[12:14])
+            
+            # Format the date as requested: day-month-year---hour-time-second
+            formatted_date = f"{day:02d}-{month:02d}-{year}---{hour:02d}-{minute:02d}-{second:02d}"
+            return formatted_date
+        except (ValueError, IndexError):
+            pass
+    
+    # If no match is found or parsing fails, use current time
+    now = datetime.datetime.now()
+    formatted_date = f"{now.day:02d}-{now.month:02d}-{now.year}---{now.hour:02d}-{now.minute:02d}-{now.second:02d}"
+    return formatted_date
 
 # Function to extract frames using ffmpeg
 def extract_frames(video_path, output_dir, fps=EXTRACT_FRAME_RATE):
     print(f"   🔄 Extracting frames at {fps} fps...")
     
     # Create a dedicated directory for this video's frames
-    video_name = os.path.basename(video_path).split('.')[0]
+    # Use relative path to avoid overly long directory names
+    rel_path = os.path.relpath(video_path, VIDEO_DIR)
+    video_name = os.path.splitext(rel_path)[0].replace(os.sep, "_")
     frames_dir = os.path.join(output_dir, video_name)
     os.makedirs(frames_dir, exist_ok=True)
     
@@ -69,10 +118,10 @@ def extract_frames(video_path, output_dir, fps=EXTRACT_FRAME_RATE):
         # Run ffmpeg command
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         print(f"   ✅ Frames extracted to {frames_dir}")
-        return frames_dir
+        return frames_dir, video_name
     except subprocess.CalledProcessError as e:
         print(f"   ❌ Error extracting frames: {e}")
-        return None
+        return None, None
 
 # Function to detect humans in an image and save to person folder if detected
 def detect_humans(image_path, video_name):
@@ -118,7 +167,7 @@ def detect_humans(image_path, video_name):
     return person_detected
 
 # Function to create clips based on frame analysis
-def create_clips_from_frames(video_path, frames_dir):
+def create_clips_from_frames(video_path, frames_dir, video_name):
     print("   🔍 Analyzing frames for people...")
     frames = sorted(glob(os.path.join(frames_dir, '*.jpg')))
     
@@ -130,7 +179,13 @@ def create_clips_from_frames(video_path, frames_dir):
     clip_segments = []
     in_segment = False
     start_frame = None
-    video_name = os.path.basename(video_path).split('.')[0]
+    
+    # Extract date from filename for output organization
+    date_str = extract_date_from_filename(video_path)
+    
+    # Create date-based output directory
+    date_output_dir = os.path.join(OUTPUT_DIR, date_str.split("---")[0])  # Use just the date part
+    os.makedirs(date_output_dir, exist_ok=True)
     
     # Frame rate used during extraction (for calculating timestamps)
     extraction_fps = EXTRACT_FRAME_RATE
@@ -161,8 +216,13 @@ def create_clips_from_frames(video_path, frames_dir):
     
     # Create clips from identified segments
     print(f"   🎬 Creating {len(clip_segments)} clips...")
+    created_clips = 0
+    
     for idx, (start_time, end_time) in enumerate(clip_segments):
-        output_path = os.path.join(OUTPUT_DIR, f"{video_name}_clip_{idx}.mp4")
+        # Generate unique timestamp for this clip
+        clip_time = datetime.datetime.now().strftime("%H-%M-%S-%f")[:10]
+        output_filename = f"{date_str}_clip{idx}_{clip_time}.mp4"
+        output_path = os.path.join(date_output_dir, output_filename)
         
         # Use ffmpeg to extract the clip
         cmd = [
@@ -179,29 +239,29 @@ def create_clips_from_frames(video_path, frames_dir):
         try:
             subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             print(f"   ✅ Created clip {idx+1}/{len(clip_segments)}: {start_time:.1f}s to {end_time:.1f}s")
+            created_clips += 1
         except subprocess.CalledProcessError as e:
             print(f"   ❌ Error creating clip {idx+1}: {e}")
     
-    return len(clip_segments)
+    return created_clips
 
 # Process each video
 for video_path in video_files:
-    video_name = os.path.basename(video_path).split('.')[0]
-    
+    # Check if we've already processed this video
     if video_path in processed_videos:
-        print(f"⏭️ ALREADY PROCESSED: {video_name}")
+        print(f"⏭️ ALREADY PROCESSED: {video_path}")
         continue
 
-    print(f"🔍 PROCESSING: {video_name}")
+    print(f"🔍 PROCESSING: {video_path}")
     start_time = time.time()
     
     try:
         # Step 1: Extract frames using ffmpeg
-        video_frames_dir = extract_frames(video_path, FRAMES_DIR)
+        video_frames_dir, video_name = extract_frames(video_path, FRAMES_DIR)
         
-        if video_frames_dir:
+        if video_frames_dir and video_name:
             # Step 2: Analyze frames and create clips
-            clips_count = create_clips_from_frames(video_path, video_frames_dir)
+            clips_count = create_clips_from_frames(video_path, video_frames_dir, video_name)
             
             # Count how many person frames were detected
             person_frames_dir = os.path.join(PERSON_FRAMES_DIR, video_name)
@@ -215,16 +275,16 @@ for video_path in video_files:
             
             # Log processing time
             process_time = time.time() - start_time
-            print(f"✅ {video_name} processed in {process_time:.1f} seconds. Created {clips_count} clips.")
+            print(f"✅ {video_path} processed in {process_time:.1f} seconds. Created {clips_count} clips.")
             
             # Add video to processed log
             with open(LOG_FILE, "a") as f:
                 f.write(video_path + "\n")
                 
         else:
-            print(f"❌ Skipping {video_name} due to frame extraction failure")
+            print(f"❌ Skipping {video_path} due to frame extraction failure")
             
     except Exception as e:
-        print(f"❌ Error processing video {video_name}: {str(e)}")
+        print(f"❌ Error processing video {video_path}: {str(e)}")
 
 print("🎉 All videos processed!")

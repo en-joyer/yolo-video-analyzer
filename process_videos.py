@@ -5,6 +5,7 @@
 #https://github.com/en-joyer/yolo-video-analyzer
 #This script written by @en-joyer
 
+
 # Install required libraries
 #!pip install opencv-python ultralytics tqdm
 
@@ -30,7 +31,7 @@ LOG_FILE = "./processed_videos.txt"  # Log file to track processed videos
 
 # Processing settings
 CONFIDENCE_THRESHOLD = 0.5  # Minimum confidence for YOLO detections
-EXTRACT_FRAME_RATE = 5  # Extract 5 frames per second (adjust for efficiency)
+EXTRACT_FRAME_RATE = 1  # Extract 5 frames per second (adjust for efficiency)
 
 # Create necessary directories
 os.makedirs(VIDEO_DIR, exist_ok=True)  # Create videos directory if it doesn't exist
@@ -85,14 +86,16 @@ def extract_date_from_filename(filename):
             
             # Format the date as requested: day-month-year---hour-time-second
             formatted_date = f"{day:02d}-{month:02d}-{year}---{hour:02d}-{minute:02d}-{second:02d}"
-            return formatted_date
+            date_only = f"{day:02d}-{month:02d}-{year}"
+            return formatted_date, date_only
         except (ValueError, IndexError):
             pass
     
     # If no match is found or parsing fails, use current time
     now = datetime.datetime.now()
     formatted_date = f"{now.day:02d}-{now.month:02d}-{now.year}---{now.hour:02d}-{now.minute:02d}-{now.second:02d}"
-    return formatted_date
+    date_only = f"{now.day:02d}-{now.month:02d}-{now.year}"
+    return formatted_date, date_only
 
 # Function to extract frames using ffmpeg
 def extract_frames(video_path, output_dir, fps=EXTRACT_FRAME_RATE):
@@ -124,7 +127,7 @@ def extract_frames(video_path, output_dir, fps=EXTRACT_FRAME_RATE):
         return None, None
 
 # Function to detect humans in an image and save to person folder if detected
-def detect_humans(image_path, video_name):
+def detect_humans(image_path, video_name, formatted_date, date_only):
     image = cv2.imread(image_path)
     if image is None:
         print(f"   ⚠️ Warning: Could not read image: {image_path}")
@@ -150,13 +153,16 @@ def detect_humans(image_path, video_name):
     
     # If a person is detected, copy the frame to the person detection folder
     if person_detected:
-        # Create a dedicated directory for this video's person frames
-        video_person_dir = os.path.join(PERSON_FRAMES_DIR, video_name)
-        os.makedirs(video_person_dir, exist_ok=True)
+        # Create a dedicated directory for this date's person frames
+        date_person_dir = os.path.join(PERSON_FRAMES_DIR, date_only)
+        os.makedirs(date_person_dir, exist_ok=True)
         
         # Copy the frame to the person directory
         frame_filename = os.path.basename(image_path)
-        person_frame_path = os.path.join(video_person_dir, frame_filename)
+        # Create a filename with date format
+        timestamp = datetime.datetime.now().strftime("%H-%M-%S-%f")[:10]
+        person_frame_name = f"{formatted_date}_{video_name}_{frame_filename}_{timestamp}.jpg"
+        person_frame_path = os.path.join(date_person_dir, person_frame_name)
         
         # Add bounding boxes to the image
         annotated_image = results[0].plot()  # This draws bounding boxes on the image
@@ -181,10 +187,10 @@ def create_clips_from_frames(video_path, frames_dir, video_name):
     start_frame = None
     
     # Extract date from filename for output organization
-    date_str = extract_date_from_filename(video_path)
+    formatted_date, date_only = extract_date_from_filename(video_path)
     
     # Create date-based output directory
-    date_output_dir = os.path.join(OUTPUT_DIR, date_str.split("---")[0])  # Use just the date part
+    date_output_dir = os.path.join(OUTPUT_DIR, date_only)
     os.makedirs(date_output_dir, exist_ok=True)
     
     # Frame rate used during extraction (for calculating timestamps)
@@ -192,7 +198,7 @@ def create_clips_from_frames(video_path, frames_dir, video_name):
     
     # Process each frame to find segments with people
     for i, frame_path in enumerate(tqdm(frames, desc="Analyzing frames")):
-        has_person = detect_humans(frame_path, video_name)
+        has_person = detect_humans(frame_path, video_name, formatted_date, date_only)
         
         # Start of a new segment with people
         if has_person and not in_segment:
@@ -221,7 +227,7 @@ def create_clips_from_frames(video_path, frames_dir, video_name):
     for idx, (start_time, end_time) in enumerate(clip_segments):
         # Generate unique timestamp for this clip
         clip_time = datetime.datetime.now().strftime("%H-%M-%S-%f")[:10]
-        output_filename = f"{date_str}_clip{idx}_{clip_time}.mp4"
+        output_filename = f"{formatted_date}_clip{idx}_{clip_time}.mp4"
         output_path = os.path.join(date_output_dir, output_filename)
         
         # Use ffmpeg to extract the clip
@@ -243,7 +249,7 @@ def create_clips_from_frames(video_path, frames_dir, video_name):
         except subprocess.CalledProcessError as e:
             print(f"   ❌ Error creating clip {idx+1}: {e}")
     
-    return created_clips
+    return created_clips, date_only
 
 # Process each video
 for video_path in video_files:
@@ -261,12 +267,13 @@ for video_path in video_files:
         
         if video_frames_dir and video_name:
             # Step 2: Analyze frames and create clips
-            clips_count = create_clips_from_frames(video_path, video_frames_dir, video_name)
+            clips_count, date_only = create_clips_from_frames(video_path, video_frames_dir, video_name)
             
             # Count how many person frames were detected
-            person_frames_dir = os.path.join(PERSON_FRAMES_DIR, video_name)
+            person_frames_dir = os.path.join(PERSON_FRAMES_DIR, date_only)
             if os.path.exists(person_frames_dir):
-                person_frames_count = len(glob(os.path.join(person_frames_dir, '*.jpg')))
+                # Count only frames related to this video
+                person_frames_count = len([f for f in os.listdir(person_frames_dir) if video_name in f])
                 print(f"   👤 Saved {person_frames_count} frames with people to {person_frames_dir}")
             
             # Step 3: Clean up extracted frames to save space
